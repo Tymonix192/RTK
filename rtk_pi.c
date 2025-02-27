@@ -15,6 +15,7 @@
 #define UDP_PORT 8000
 #define BUFF_SIZE 1024
 #define UART_BUFF_SIZE 256
+#define UART_PORT "/dev/serial0"
 
 typedef unsigned char u1;
 enum {
@@ -103,6 +104,7 @@ int main(){
             buffer[msg_len] = '\0';
             fprintf(udp_log, "%s", buffer);
             printf("saving udp datagram\n");
+            ssize_t resp = write(uart_stream, buffer, sizeof(buffer));
             }
         }
     pthread_join(&uart_thread, (void*) uart_buff);
@@ -111,7 +113,7 @@ int main(){
 
 
 void* uart_thread(void* arg) {
-    int uart_stream = configure_uart("/dev/serial0", B115200);
+    int uart_stream = configure_uart(UART_PORT, B115200);
     if (uart_stream == -1) {
         return NULL;
     }
