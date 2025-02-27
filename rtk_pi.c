@@ -24,41 +24,16 @@ enum {
     rShift = bits - lShift
 };
 #define ROT_LEFT(val) ((val << lShift) | (val >> rShift))
-u1 checksum(u1 const* src, int count)
-{
-    u1 res = 0;
-    while(count--)
-    res = ROT_LEFT(res) ^ *src++;
-    return ROT_LEFT(res);
-}
 
-pthread_mutex_t uart_mutex = PTHREAD_MUTEX_INITIALIZER;
+u1 checksum(u1 const* src, int count);
+char* skip_message(char* mess, ssize_t lenght);
 void* uart_thread(void* arg);
 char* parse_message(char *mess);
 
-int configure_uart(const char* device, int baudrate){
-    int uart_filestream = open(device, O_RDWR | O_NOCTTY | O_NDELAY);
-    if(uart_filestream == -1){
-        perror("Failed to open UART");
-        return EXIT_FAILURE;
-    }
-    struct termios options;
-    tcgetattr(uart_filestream, &options);
-    cfsetispeed(&options, baudrate);
-    cfsetospeed(&options, baudrate);
-    options.c_cflag &= ~PARENB;
-    options.c_cflag &= ~CSTOPB;
-    options.c_cflag &= ~CSIZE;
-    options.c_cflag |= CS8;
-    options.c_cflag |= (CLOCAL | CREAD);
-    options.c_iflag &= ~(IXON | IXOFF | IXANY);
-    options.c_lflag = 0;
-    options.c_oflag = 0;
-    options.c_iflag &= ~(ICANON | ECHO | ECHOE | ISIG);
-    tcsetattr(uart_filestream, TCSANOW, &options);
+pthread_mutex_t uart_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-    return uart_filestream;
-}
+int configure_uart(const char* device, int baudrate);
+
 
 int main(){
     pthread_t uart_thread;
@@ -104,11 +79,16 @@ int main(){
             buffer[msg_len] = '\0';
             fprintf(udp_log, "%s", buffer);
             printf("saving udp datagram\n");
-            if(pthread_mutex_trylock(&uart_mutex) == 0){
-                ssize_t resp = write(uart_stream, buffer, sizeof(buffer));
-                if(resp != 0) perror(errno);
-                pthread_mutex_unlock(&uart_mutex);
+            ssize_t acquired = 0;
+            while(!acquired){
+                if(pthread_mutex_trylock(&uart_mutex) == 0){
+                    acquired = 1;
+                }
             }
+            ssize_t resp = write(uart_stream, buffer, sizeof(buffer));
+            if(resp != 0) perror(errno);
+            pthread_mutex_unlock(&uart_mutex);
+        
         }
     }
     pthread_join(&uart_thread, (void*) uart_buff);
@@ -123,12 +103,16 @@ void* uart_thread(void* arg) {
     }
     FILE* uart_log = open("uart_log.txt", "w+");
     char buffer[UART_BUFF_SIZE];
+    int mutex_acuired = 0;
     pthread_mutex_init(&uart_mutex, uart_stream);
-    if(pthread_mutex_trylock(&uart_mutex) == 0){
-        puts("mutex acquired");
-    }else{
-        perror(errno);
-    };
+    while(!mutex_acuired){
+        if(pthread_mutex_trylock(&uart_mutex) == 0){
+            puts("mutex acquired");
+            mutex_acuired = 1;
+        }else{
+            perror(errno);
+        }
+    }
     int bytes_read = read(uart_stream, buffer, UART_BUFF_SIZE - 1);
     if (bytes_read > 0) {
         buffer[bytes_read] = '\0';
@@ -147,11 +131,6 @@ char *parse_message(char* message){
     int mess_lenght = *(message+2)*100 + *(message+3)*10 + *(message+4);
     int reck = 0;
     u1 check = checksum(message, mess_lenght);
-    if(!reck){
-        //skip next mess_lenght + 5 chars
-        //skip all <CR> and <LF> chars
-        return -1;
-    }
     //check checksum
     u1 calc_checksum = 0;
     for(int i = 0; i<5; i++){
@@ -160,10 +139,48 @@ char *parse_message(char* message){
     if(check != calc_checksum){
         return "bad cheksum";
     }
-    //parse message depending on type. Define mess types or hard code them in
+    // parse message depending on type. Define mess types or hard code them in
     // if mess lengh>expected message lengh, ignore the additional data, if smaller
     // ignore the message
+    //Change the mutex lock to spinlock
 
 
     
+}
+
+u1 checksum(u1 const* src, int count)
+{
+    u1 res = 0;
+    while(count--)
+    res = ROT_LEFT(res) ^ *src++;
+    return ROT_LEFT(res);
+}
+
+char *skip_message(char* message, ssize_t mess_lenght){
+    
+}
+// create a function that would skipp incoming message, return a new pointer to function parse message
+
+int configure_uart(const char* device, int baudrate){
+    int uart_filestream = open(device, O_RDWR | O_NOCTTY | O_NDELAY);
+    if(uart_filestream == -1){
+        perror("Failed to open UART");
+        return EXIT_FAILURE;
+    }
+    struct termios options;
+    tcgetattr(uart_filestream, &options);
+    cfsetispeed(&options, baudrate);
+    cfsetospeed(&options, baudrate);
+    options.c_cflag &= ~PARENB;
+    options.c_cflag &= ~CSTOPB;
+    options.c_cflag &= ~CSIZE;
+    options.c_cflag |= CS8;
+    options.c_cflag |= (CLOCAL | CREAD);
+    options.c_iflag &= ~(IXON | IXOFF | IXANY);
+    options.c_lflag = 0;
+    options.c_oflag = 0;
+    options.c_iflag &= ~(ICANON | ECHO | ECHOE | ISIG);
+    tcsetattr(uart_filestream, TCSANOW, &options);
+
+    return uart_filestream;
 }
