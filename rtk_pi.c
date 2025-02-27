@@ -104,9 +104,13 @@ int main(){
             buffer[msg_len] = '\0';
             fprintf(udp_log, "%s", buffer);
             printf("saving udp datagram\n");
-            ssize_t resp = write(uart_stream, buffer, sizeof(buffer));
+            if(pthread_mutex_trylock(&uart_mutex) == 0){
+                ssize_t resp = write(uart_stream, buffer, sizeof(buffer));
+                if(resp != 0) perror(errno);
+                pthread_mutex_unlock(&uart_mutex);
             }
         }
+    }
     pthread_join(&uart_thread, (void*) uart_buff);
     pthread_mutex_destroy(&uart_mutex);
 }
