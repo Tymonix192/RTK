@@ -1,4 +1,6 @@
 #include <stdint.h>
+#include <stdlib.h>
+#include <sys/types.h>
 
 #define UDP_PORT 8000
 #define BUFF_SIZE 1024
@@ -24,3 +26,19 @@ enum {
 };
 
 #define ROT_LEFT(val) ((val << lShift) | (val >> rShift))
+
+typedef struct{
+    f8 lat;
+    f8 lon;
+    f8 alt;
+    f4 pSigma;
+    u1 solType;
+    u1 cheksum;
+}geo_pos;
+
+
+u1 checksum(u1 const *src, int count);
+char* skip_message(char* mess, i4 lenght);
+void* uart_thread(void* arg);
+char* parse_message(char *mess);
+char* parse_geo_pos(char* mess);

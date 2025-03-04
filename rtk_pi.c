@@ -133,7 +133,38 @@ void* uart_thread(void* arg) {
     return NULL;
 }
 
+char* parse_geo_pos(char* mess){
+
+    u1* buff = (u1*)mess;
+
+    u1 chek = checksum(buff, 30);
+
+    geo_pos pos;
+    
+    memcpy(&pos.lat, buff, sizeof(f8));
+    buff += sizeof(f8);
+    memcpy(&pos.lon, buff, sizeof(f8));
+    buff += sizeof(f8);
+    memcpy(&pos.alt, buff, sizeof(f8));
+    buff += sizeof(f8);
+    memcpy(&pos.pSigma, buff, sizeof(pos.pSigma));
+    buff += sizeof(pos.pSigma);
+    memcpy(&pos.solType, buff, sizeof(pos.solType));
+    buff += sizeof(pos.solType);
+    memcpy(&pos.cheksum, buff, sizeof(pos.cheksum));
+    buff += sizeof(pos.cheksum);
+
+    if(pos.cheksum != chek){
+        return NULL;
+    }
+
+    printf("lat: %08x, lon: %08x, alt: %08x, pSig: %04x, solType: %01x", pos.lat, pos.lon, pos.alt, pos.pSigma, pos.solType);
+
+    return buff; // pointer to rest of the string for multiple mess parsing
+}
+
 char *parse_message(char* message){
+    a1 id[2] = {*message, *message+1 , "\0"};
     int mess_lenght = *(message+2)*100 + *(message+3)*10 + *(message+4);
     int reck = 0;
     u1 check = checksum(message, mess_lenght);
