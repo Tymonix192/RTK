@@ -11,19 +11,9 @@
 #include <pthread.h>
 #include <sys/ioctl.h>
 #include <errno.h>
+#include <time.h>
+#include "rtk_definitions.h"
 
-#define UDP_PORT 8000
-#define BUFF_SIZE 1024
-#define UART_BUFF_SIZE 256
-#define UART_PORT "/dev/serial0"
-
-typedef unsigned char u1;
-enum {
-    bits = 8,
-    lShift = 2,
-    rShift = bits - lShift
-};
-#define ROT_LEFT(val) ((val << lShift) | (val >> rShift))
 
 u1 checksum(u1 const* src, int count);
 char* skip_message(char* mess, ssize_t lenght);
@@ -36,14 +26,13 @@ int configure_uart(const char* device, int baudrate);
 
 
 int main(){
-    pthread_t uart_thread;
+    pthread_t *uart_thread;
     
     int udp_rx_sock;
     struct sockaddr_in my_addr = {  .sin_family = AF_INET,
                                     .sin_addr.s_addr = INADDR_ANY,
                                     .sin_port = htons(UDP_PORT)};
     char buffer[BUFF_SIZE];
-    char uart_buff[UART_BUFF_SIZE];
 
     if((udp_rx_sock = socket(AF_INET, SOCK_DGRAM, 0))<=0){
         perror("failed to create sock");
@@ -65,21 +54,36 @@ int main(){
 //    if(uart_stream2 == -1) return EXIT_FAILURE;
 
     FILE* udp_log = fopen("udp_log.txt", "w+");
+    if (!udp_log) {
+        perror("Failed to open udp_log.txt");
+        close(uart_stream);
+        close(udp_rx_sock);
+        return EXIT_FAILURE;
+    }
 
     ssize_t msg_len;
     int bytes_read1;
     char uart_buff[UART_BUFF_SIZE];
     
+    if((pthread_create(&uart_thread, NULL, uart_thread, (void*) uart_buff)) != 0){
+        perror("Failed to create UART thread");
+        fclose(udp_log);
+        close(uart_stream);
+        close(udp_rx_sock);
+        return EXIT_FAILURE;
+    }
+    
     while (1) {
-
-        pthread_create(&uart_thread, NULL, uart_thread, (void*) uart_buff);
-        
         ssize_t msg_len = recv(udp_rx_sock, buffer, BUFF_SIZE, 0);
+
+        
         if (msg_len > 0) {
             buffer[msg_len] = '\0';
             fprintf(udp_log, "%s", buffer);
             printf("saving udp datagram\n");
+            
             ssize_t acquired = 0;
+            
             while(!acquired){
                 if(pthread_mutex_trylock(&uart_mutex) == 0){
                     acquired = 1;
@@ -88,10 +92,11 @@ int main(){
             ssize_t resp = write(uart_stream, buffer, sizeof(buffer));
             if(resp != 0) perror(errno);
             pthread_mutex_unlock(&uart_mutex);
+            
         
         }
     }
-    pthread_join(&uart_thread, (void*) uart_buff);
+    pthread_join(uart_thread, NULL);
     pthread_mutex_destroy(&uart_mutex);
 }
 
@@ -101,7 +106,7 @@ void* uart_thread(void* arg) {
     if (uart_stream == -1) {
         return NULL;
     }
-    FILE* uart_log = open("uart_log.txt", "w+");
+    FILE* uart_log = fopen("uart_log.txt", "w+");
     char buffer[UART_BUFF_SIZE];
     int mutex_acuired = 0;
     pthread_mutex_init(&uart_mutex, uart_stream);
@@ -110,7 +115,7 @@ void* uart_thread(void* arg) {
             puts("mutex acquired");
             mutex_acuired = 1;
         }else{
-            perror(errno);
+            puts(errno);
         }
     }
     int bytes_read = read(uart_stream, buffer, UART_BUFF_SIZE - 1);
@@ -124,6 +129,7 @@ void* uart_thread(void* arg) {
         printf("saving uart readings\n");
     }
     pthread_mutex_unlock(&uart_mutex);
+    fclose(uart_log);
     return NULL;
 }
 
@@ -133,12 +139,14 @@ char *parse_message(char* message){
     u1 check = checksum(message, mess_lenght);
     //check checksum
     u1 calc_checksum = 0;
-    for(int i = 0; i<5; i++){
+    for(int i = 0; i<4; i++){
         calc_checksum += *(message+mess_lenght+i);
-    }
+    } // potentialy a hex
     if(check != calc_checksum){
         return "bad cheksum";
     }
+
+
     // parse message depending on type. Define mess types or hard code them in
     // if mess lengh>expected message lengh, ignore the additional data, if smaller
     // ignore the message
