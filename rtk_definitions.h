@@ -6,6 +6,10 @@
 #define BUFF_SIZE 1024
 #define UART_BUFF_SIZE 256
 #define UART_PORT "/dev/serial0"
+#define SPI_PORT "/dev/spidev0.0"
+#define SPI_BITS_PER_WORD 8
+#define SPI_SPEED 1000000
+#define SPI_MODE SPI_MODE_0
 
 typedef unsigned char u1;
 typedef char a1;
@@ -37,8 +41,10 @@ typedef struct{
 }geo_pos;
 
 
-u1 checksum(u1 const *src, int count);
+u1 checksum(u1 const* src, int count);
 char* skip_message(char* mess, i4 lenght);
 void* uart_thread(void* arg);
 char* parse_message(char *mess);
 char* parse_geo_pos(char* mess);
+void send_spi(char* mess, ssize_t len);
+char* recieve_spi();

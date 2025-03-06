@@ -12,13 +12,10 @@
 #include <sys/ioctl.h>
 #include <errno.h>
 #include <time.h>
+#include <linux/spi/spidev.h>
 #include "rtk_definitions.h"
 
-
-u1 checksum(u1 const* src, int count);
-char* skip_message(char* mess, ssize_t lenght);
-void* uart_thread(void* arg);
-char* parse_message(char *mess);
+// add CAN through spi for sbRIO comms
 
 pthread_mutex_t uart_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -222,4 +219,55 @@ int configure_uart(const char* device, int baudrate){
     tcsetattr(uart_filestream, TCSANOW, &options);
 
     return uart_filestream;
+}
+
+void send_spi(char* message, ssize_t mess_len){
+    int fd;
+    int ret;
+
+    struct spi_ioc_transfer transfer ={
+        
+    };
+    
+
+    if((fd = open(SPI_PORT, O_WRONLY)) <0){
+        perror("SPI device opening error");
+        return NULL;
+    }
+
+    uint8_t bits = SPI_BITS_PER_WORD;
+    ret = ioctl(fd, SPI_IOC_WR_BITS_PER_WORD, &bits);
+    if (ret < 0) {
+        perror("Failed to set bits per word");
+        close(fd);
+        return 1;
+    }
+
+    uint32_t speed = SPI_SPEED;
+    ret = ioctl(fd, SPI_IOC_WR_MAX_SPEED_HZ, &speed);
+    if (ret < 0) {
+        perror("Failed to set SPI speed");
+        close(fd);
+        return 1;
+    }
+
+    if((ret = write(fd, message, mess_len))<0){
+        perror("failed to write");
+    }
+    close(fd);
+}
+
+char* recieve_spi(){
+    char buff[BUFF_SIZE];
+    int fd;
+    int rec;
+
+    if((fd = open(SPI_PORT, O_RDONLY)) <0 ){
+        perror("failed opening spi port\t");
+        return NULL;
+    }
+    if((rec = read(fd, buff, BUFF_SIZE))<0){
+        perror("failed reading");
+    }
+    return buff;
 }
