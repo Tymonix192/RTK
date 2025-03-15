@@ -99,11 +99,14 @@ int main(){
 
 
 void* uart_thread(void* arg) {
-    int uart_stream = configure_uart(UART_PORT, B115200);
+    uart_config_t *config = (uart_config_t *)arg;
+
+    int uart_stream = configure_uart(config->uart_port, config->rate);
     if (uart_stream == -1) {
         return NULL;
     }
-    FILE* uart_log = fopen("uart_log.txt", "w+");
+    
+    FILE* uart_log = fopen(config->log_file,  "w+");
     char buffer[UART_BUFF_SIZE];
     int mutex_acuired = 0;
     pthread_mutex_init(&uart_mutex, uart_stream);
@@ -117,13 +120,15 @@ void* uart_thread(void* arg) {
     }
     int bytes_read = read(uart_stream, buffer, UART_BUFF_SIZE - 1);
     if (bytes_read > 0) {
+        //check for id, then get lenght, then pass till mess lenght is not fully here, if not, i will not parse message, no chance
         buffer[bytes_read] = '\0';
-        if (uart_log) {
-            fprintf(uart_log, "%s", buffer);
-            fflush(uart_log);
+        char* message = buffer;
+        int err;
+        if((err = parse_message) <0){
+            perror("sth went wrong in parsing in thread while parsing");
+            return NULL;
         }
-        
-        printf("saving uart readings\n");
+        printf("message saved");
     }
     pthread_mutex_unlock(&uart_mutex);
     fclose(uart_log);
@@ -136,7 +141,7 @@ char* parse_geo_pos(char* mess){
 
     u1 chek = checksum(buff, 30);
 
-    geo_pos pos;
+    geo_pos_t pos;
     
     memcpy(&pos.lat, buff, sizeof(f8));
     buff += sizeof(f8);
@@ -155,32 +160,52 @@ char* parse_geo_pos(char* mess){
         return NULL;
     }
 
-    printf("lat: %08x, lon: %08x, alt: %08x, pSig: %04x, solType: %01x", pos.lat, pos.lon, pos.alt, pos.pSigma, pos.solType);
 
     return buff; // pointer to rest of the string for multiple mess parsing
 }
 
-char *parse_message(char* message){
+int parse_message(char* message){
     a1 id[2] = {*message, *message+1 , "\0"};
-    int mess_lenght = *(message+2)*100 + *(message+3)*10 + *(message+4);
+    a1 mess_lenght[3];
+    a1 len = mess_lenght[0]*16*16 + mess_lenght[1]*16 + mess_lenght[2];
+    memcpy(mess_lenght, message+2, 3);
     int reck = 0;
     u1 check = checksum(message, mess_lenght);
     //check checksum
     u1 calc_checksum = 0;
     for(int i = 0; i<4; i++){
-        calc_checksum += *(message+mess_lenght+i);
+        calc_checksum += *(message+len+i);
     } // potentialy a hex
     if(check != calc_checksum){
         return "bad cheksum";
     }
 
-
+    int mess_type;
     // parse message depending on type. Define mess types or hard code them in
     // if mess lengh>expected message lengh, ignore the additional data, if smaller
     // ignore the message
     //Change the mutex lock to spinlock
+    FILE* temp_log = open("/temp_log.txt", "w+");
 
+    geo_pos_t ans;
+    switch (mess_type){
+        case PV:
+            ans.lat = strtod(message+5, &message); 
+            message++;
+            ans.lon = strtod(message, &message);
+            message++;
+            ans.alt = strtod(message, &message);
+            message++;
+            ans.pSigma = strtod(message, &message);
+            message++;
+            ans.pSigma = atof(message);
+            message+= sizeof(f4) + 1;
+            ans.solType = *message;
+            message++;
+            ans.cheksum = *message;
 
+            write(temp_log, &ans, sizeof(geo_pos_t));
+        }
     
 }
 
@@ -221,18 +246,27 @@ int configure_uart(const char* device, int baudrate){
     return uart_filestream;
 }
 
-void send_spi(char* message, ssize_t mess_len){
+int spi_communication(char* message, ssize_t mess_len){
     int fd;
     int ret;
 
-    struct spi_ioc_transfer transfer ={
-        
+    char tx_buff [BUFF_SIZE];
+    char rx_buff [BUFF_SIZE];
+
+    struct spi_ioc_transfer transfer = {
+        .tx_buf = (unsigned long)tx_buff, // Cast buffer to 64-bit pointer
+        .rx_buf = (unsigned long)rx_buff,
+        .len = sizeof(tx_buff),                           // Transfer 2 bytes
+        .speed_hz = SPI_SPEED,              // Use configured speed
+        .bits_per_word = SPI_BITS_PER_WORD, // Use configured bits
+        .delay_usecs = 0,                   // No delay after transfer
+        .cs_change = 0,                     // Deassert CS after transfer
     };
     
 
     if((fd = open(SPI_PORT, O_WRONLY)) <0){
         perror("SPI device opening error");
-        return NULL;
+        return -1;
     }
 
     uint8_t bits = SPI_BITS_PER_WORD;
@@ -240,7 +274,7 @@ void send_spi(char* message, ssize_t mess_len){
     if (ret < 0) {
         perror("Failed to set bits per word");
         close(fd);
-        return 1;
+        return -1;
     }
 
     uint32_t speed = SPI_SPEED;
@@ -255,19 +289,65 @@ void send_spi(char* message, ssize_t mess_len){
         perror("failed to write");
     }
     close(fd);
+
+    ret = ioctl(fd, SPI_IOC_MESSAGE(1), &transfer);
+    if (ret < 0) {
+        perror("Failed to perform SPI transfer");
+        close(fd);
+        return -1;
+    }
 }
 
-char* recieve_spi(){
-    char buff[BUFF_SIZE];
-    int fd;
-    int rec;
-
-    if((fd = open(SPI_PORT, O_RDONLY)) <0 ){
-        perror("failed opening spi port\t");
-        return NULL;
+int parse_mess(char* buff){
+    int res;
+    int len_tab[2];
+    strncpy(len_tab, buff+2, 3);
+    int len = len_tab[0]*10 + len_tab[1]*10 + len_tab[2];
+    if(strncmp(buff, "AI", 2) == 0){
+        
+    return AI;
+    }else if(strncmp(buff, "PV", 2) == 0){
+    return PV;
+    }else if(strncmp(buff, "::", 2) == 0){
+        if(len<11) return -1;
+        u4 time;
+        for(int i =0; i<5; i++){
+            time += *(buff+5+i)*pow(16,4-i);
+        }
+        printf("mess: AI, reciever time: %f", time);
+    return ET;
+    }else if(strncmp(buff, "PG", 2) == 0){
+        if(len < 35) return -1;
+        
+        u1 chek = checksum(buff, 30);
+        geo_pos_t pos;
+    
+        memcpy(&pos.lat, buff, sizeof(f8));
+        buff += sizeof(f8);
+        memcpy(&pos.lon, buff, sizeof(f8));
+        buff += sizeof(f8);
+        memcpy(&pos.alt, buff, sizeof(f8));
+        buff += sizeof(f8);
+        memcpy(&pos.pSigma, buff, sizeof(pos.pSigma));
+        buff += sizeof(pos.pSigma);
+        memcpy(&pos.solType, buff, sizeof(pos.solType));
+        buff += sizeof(pos.solType);
+        memcpy(&pos.cheksum, buff, sizeof(pos.cheksum));
+        buff += sizeof(pos.cheksum);
+    return PG;
+    }else if(strncmp(buff, "VG", 2) == 0){
+    return VG;
+    }else if(strncmp(buff, "AR", 2) == 0){
+    return AR;
+    }else if(strncmp(buff, "AV", 2) == 0){
+    return AV;
+    }else if(strncmp(buff, "MA", 2) == 0){
+    return MA;
+    }else if(strncmp(buff, "ha", 2) == 0){
+    return ha;
+    }else if(strncmp(buff, "mr", 2) == 0){
+    return mr;
+    }else{
+        return -1;
     }
-    if((rec = read(fd, buff, BUFF_SIZE))<0){
-        perror("failed reading");
-    }
-    return buff;
 }
