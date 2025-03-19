@@ -12,18 +12,38 @@
 #include <sys/ioctl.h>
 #include <errno.h>
 #include <time.h>
+#include <getopt.h>
 #include <linux/spi/spidev.h>
 #include "rtk_definitions.h"
 
-// add CAN through spi for sbRIO comms
+pthread_mutex_t uart_mutex_1 = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t uart_mutex_2 = PTHREAD_MUTEX_INITIALIZER;
+int spi_fd; // File descriptor for SPI device
+pthread_mutex_t spi_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-pthread_mutex_t uart_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-int configure_uart(const char* device, int baudrate);
-
-
-int main(){
-    pthread_t *uart_thread;
+int main(int argc, char* argv[]){
+    char *mode = "udp";
+    struct option long_options[] = {
+        {"mode", required_argument, 0, 'm'},
+        {0, 0, 0, 0}
+    };
+    int opt;
+    while ((opt = getopt_long(argc, argv, "", long_options, NULL)) != -1) {
+        switch (opt) {
+            case 'm':
+                mode = optarg;
+                break;
+            default:
+                fprintf(stderr, "Usage: %s [--mode=udp|spi]\n", argv[0]);
+                exit(EXIT_FAILURE);
+        }
+    }
+    if (strcmp(mode, "udp") != 0 && strcmp(mode, "spi") != 0) {
+        fprintf(stderr, "Invalid mode: %s. Must be 'udp' or 'spi'.\n", mode);
+        exit(EXIT_FAILURE);
+    }
+    
+    pthread_t uart_thread;
     
     int udp_rx_sock;
     struct sockaddr_in my_addr = {  .sin_family = AF_INET,
@@ -47,6 +67,10 @@ int main(){
 
     int uart_stream = configure_uart("/dev/serial0", B115200);
     if(uart_stream == -1) return EXIT_FAILURE;
+    
+    mcp2515_init();
+    init_spi();
+
 //    int uart_stream2 = configure_uart("dev/ttyAMA1", B9600);
 //    if(uart_stream2 == -1) return EXIT_FAILURE;
 
@@ -58,12 +82,36 @@ int main(){
         return EXIT_FAILURE;
     }
 
+    int uart_1_mess_rd = 0x0;
+    int uart_2_mess_rd = 0x0;
     ssize_t msg_len;
     int bytes_read1;
     char uart_buff[UART_BUFF_SIZE];
     
-    if((pthread_create(&uart_thread, NULL, uart_thread, (void*) uart_buff)) != 0){
-        perror("Failed to create UART thread");
+    FILE* uart_log_1 = open("uart_log_1.txt", "w");
+    FILE* uart_log_2 = open("uart_log_2.txt", "w");
+
+    uart_config_t uart_config_1 = {
+        .rate = BAUD_RATE,
+        .uart_port = UART_PORT,
+        .log_file = uart_log_1,
+        .uart_mutex = uart_mutex_1
+    };
+    uart_config_t uart_config_2 = {
+        .rate = BAUD_RATE,
+        .uart_port = UART_PORT_2,
+        .log_file = uart_log_2,
+        .uart_mutex = uart_mutex_2
+    };
+    if((pthread_create(&uart_thread, NULL, uart_thread, (void*) &uart_config_1)) != 0){
+        perror("Failed to create UART thread nr1");
+        fclose(udp_log);
+        close(uart_stream);
+        close(udp_rx_sock);
+        return EXIT_FAILURE;
+    }
+    if((pthread_create(&uart_thread, NULL, uart_thread, (void*) &uart_config_2)) != 0){
+        perror("Failed to create UART thread nr2");
         fclose(udp_log);
         close(uart_stream);
         close(udp_rx_sock);
@@ -73,7 +121,6 @@ int main(){
     while (1) {
         ssize_t msg_len = recv(udp_rx_sock, buffer, BUFF_SIZE, 0);
 
-        
         if (msg_len > 0) {
             buffer[msg_len] = '\0';
             fprintf(udp_log, "%s", buffer);
@@ -82,25 +129,35 @@ int main(){
             ssize_t acquired = 0;
             
             while(!acquired){
-                if(pthread_mutex_trylock(&uart_mutex) == 0){
+                if(pthread_mutex_trylock(&uart_mutex_1) == 0){
                     acquired = 1;
                 }
             }
-            ssize_t resp = write(uart_stream, buffer, sizeof(buffer));
-            if(resp != 0) perror(errno);
-            pthread_mutex_unlock(&uart_mutex);
+            ssize_t resp = write(uart_stream, buffer, msg_len);
+            if(resp < 0) perror(errno);
+            pthread_mutex_unlock(&uart_mutex_1);
+            ssize_t acquired_2 = 0;
             
-        
+            while(!acquired_2){
+                if(pthread_mutex_trylock(&uart_mutex_2) == 0){
+                    acquired_2 = 1;
+                }
+            }
+            ssize_t resp = write(uart_stream, buffer, msg_len);
+            if(resp < 0) perror(errno);
+            pthread_mutex_unlock(&uart_mutex_1);
         }
     }
     pthread_join(uart_thread, NULL);
-    pthread_mutex_destroy(&uart_mutex);
+    pthread_mutex_destroy(&uart_mutex_1);
+    pthread_mutex_destroy(&uart_mutex_2);
 }
 
 
 void* uart_thread(void* arg) {
     uart_config_t *config = (uart_config_t *)arg;
 
+    pthread_mutex_t uart_mutex = config->uart_mutex;
     int uart_stream = configure_uart(config->uart_port, config->rate);
     if (uart_stream == -1) {
         return NULL;
@@ -118,95 +175,75 @@ void* uart_thread(void* arg) {
             puts(errno);
         }
     }
-    int bytes_read = read(uart_stream, buffer, UART_BUFF_SIZE - 1);
-    if (bytes_read > 0) {
-        //check for id, then get lenght, then pass till mess lenght is not fully here, if not, i will not parse message, no chance
-        buffer[bytes_read] = '\0';
-        char* message = buffer;
-        int err;
-        if((err = parse_message) <0){
-            perror("sth went wrong in parsing in thread while parsing");
-            return NULL;
+    int bytes_curr_buff = 0;
+    int got_data = 0x0;
+    mess_data_t curr_mess_data = {0,0};
+    char* pointer = buffer;
+    while(1){
+        int bytes_read = read(uart_stream, pointer+bytes_curr_buff, 16);
+        
+        if (bytes_read > 0) {
+            bytes_curr_buff += bytes_read;
+            char* message = buffer;
+            //check for id
+            // if id, check for lenght
+            if(got_data == 0x0){
+                curr_mess_data = get_mess_data(message);
+                got_data = 0x1;
+            }
+            if(bytes_curr_buff >= curr_mess_data.lenght){
+            // pass if curr buff len<len.
+            // else do parsing
+            //check for id, then get lenght, then pass till mess lenght is not fully here, if not
+                buffer[bytes_curr_buff] = '\0';
+                int err;
+                if((err = parse_message(message, curr_mess_data)) <0){
+                    perror("sth went wrong in uart in thread while parsing");
+                }
+                got_data = 0x0;
+                bytes_curr_buff = 0;
+            }
         }
-        printf("message saved");
     }
     pthread_mutex_unlock(&uart_mutex);
     fclose(uart_log);
     return NULL;
 }
 
-char* parse_geo_pos(char* mess){
-
-    u1* buff = (u1*)mess;
-
-    u1 chek = checksum(buff, 30);
-
-    geo_pos_t pos;
-    
-    memcpy(&pos.lat, buff, sizeof(f8));
-    buff += sizeof(f8);
-    memcpy(&pos.lon, buff, sizeof(f8));
-    buff += sizeof(f8);
-    memcpy(&pos.alt, buff, sizeof(f8));
-    buff += sizeof(f8);
-    memcpy(&pos.pSigma, buff, sizeof(pos.pSigma));
-    buff += sizeof(pos.pSigma);
-    memcpy(&pos.solType, buff, sizeof(pos.solType));
-    buff += sizeof(pos.solType);
-    memcpy(&pos.cheksum, buff, sizeof(pos.cheksum));
-    buff += sizeof(pos.cheksum);
-
-    if(pos.cheksum != chek){
-        return NULL;
+int parse_message(char* message, mess_data_t message_type){   
+    char* body = message +5;
+    if(checksum(body, message_type.lenght) != *(message + message_type.lenght -1)) {
+        perror("corrupted message, checksum not right");
+        return -1;
+    };
+    switch (message_type.mess_type)
+    {
+    case ET:
+        ET_data_t data_ET;
+        copy_data(&data_ET, body, sizeof(data_ET));
+        //send somewhere or sth
+        return 0;
+    case PG:
+        // trying the move approach for the data transfer.
+        PG_data_t data_PG;
+        pg_data_u* u_ptr;
+        u_ptr = message+5;
+        message = NULL;
+        return 0;
+    case VG:
+        VG_data_t data_VG;
+        copy_data(&data_VG, body, sizeof(data_VG));
+        //add some further parsing/sending elswhere
+        return 0;
+    case AR:
+        AR_data_t data_AR;
+        copy_data(&data_AR, body, sizeof(data_AR));
+        //test if this will work
+        return 0;
+    default:
+        return -1;
     }
 
-
-    return buff; // pointer to rest of the string for multiple mess parsing
-}
-
-int parse_message(char* message){
-    a1 id[2] = {*message, *message+1 , "\0"};
-    a1 mess_lenght[3];
-    a1 len = mess_lenght[0]*16*16 + mess_lenght[1]*16 + mess_lenght[2];
-    memcpy(mess_lenght, message+2, 3);
-    int reck = 0;
-    u1 check = checksum(message, mess_lenght);
-    //check checksum
-    u1 calc_checksum = 0;
-    for(int i = 0; i<4; i++){
-        calc_checksum += *(message+len+i);
-    } // potentialy a hex
-    if(check != calc_checksum){
-        return "bad cheksum";
-    }
-
-    int mess_type;
-    // parse message depending on type. Define mess types or hard code them in
-    // if mess lengh>expected message lengh, ignore the additional data, if smaller
-    // ignore the message
-    //Change the mutex lock to spinlock
-    FILE* temp_log = open("/temp_log.txt", "w+");
-
-    geo_pos_t ans;
-    switch (mess_type){
-        case PV:
-            ans.lat = strtod(message+5, &message); 
-            message++;
-            ans.lon = strtod(message, &message);
-            message++;
-            ans.alt = strtod(message, &message);
-            message++;
-            ans.pSigma = strtod(message, &message);
-            message++;
-            ans.pSigma = atof(message);
-            message+= sizeof(f4) + 1;
-            ans.solType = *message;
-            message++;
-            ans.cheksum = *message;
-
-            write(temp_log, &ans, sizeof(geo_pos_t));
-        }
-    
 }
 
 u1 checksum(u1 const* src, int count)
@@ -216,11 +253,6 @@ u1 checksum(u1 const* src, int count)
     res = ROT_LEFT(res) ^ *src++;
     return ROT_LEFT(res);
 }
-
-char *skip_message(char* message, ssize_t mess_lenght){
-    
-}
-// create a function that would skipp incoming message, return a new pointer to function parse message
 
 int configure_uart(const char* device, int baudrate){
     int uart_filestream = open(device, O_RDWR | O_NOCTTY | O_NDELAY);
@@ -298,56 +330,211 @@ int spi_communication(char* message, ssize_t mess_len){
     }
 }
 
-int parse_mess(char* buff){
+mess_data_t get_mess_data(char* buff){
     int res;
-    int len_tab[2];
-    strncpy(len_tab, buff+2, 3);
-    int len = len_tab[0]*10 + len_tab[1]*10 + len_tab[2];
+    u1 len_bytes[3];
+    memcpy(len_bytes, buff + 2, 3);
+    int len = (len_bytes[0] << 16) | (len_bytes[1] << 8) | len_bytes[2];
+    int lenght_log = open("mess_lenght_log.txt", "w");
+    if(write(lenght_log, &len, sizeof(len))<0){
+        perror("sth went wrong writiong to the lenght log file");
+    }
+    close(lenght_log);
     if(strncmp(buff, "AI", 2) == 0){
-        
-    return AI;
+        if(len>=26) return (mess_data_t){len, AI};
+        return CORRUPTED_MESS;
     }else if(strncmp(buff, "PV", 2) == 0){
-    return PV;
+        if(len>=35) return (mess_data_t){len, PV};
+        return CORRUPTED_MESS;
     }else if(strncmp(buff, "::", 2) == 0){
-        if(len<11) return -1;
-        u4 time;
-        for(int i =0; i<5; i++){
-            time += *(buff+5+i)*pow(16,4-i);
-        }
-        printf("mess: AI, reciever time: %f", time);
-    return ET;
+        if(len>=11) return (mess_data_t){len, ET};
+        return CORRUPTED_MESS
     }else if(strncmp(buff, "PG", 2) == 0){
-        if(len < 35) return -1;
-        
-        u1 chek = checksum(buff, 30);
-        geo_pos_t pos;
-    
-        memcpy(&pos.lat, buff, sizeof(f8));
-        buff += sizeof(f8);
-        memcpy(&pos.lon, buff, sizeof(f8));
-        buff += sizeof(f8);
-        memcpy(&pos.alt, buff, sizeof(f8));
-        buff += sizeof(f8);
-        memcpy(&pos.pSigma, buff, sizeof(pos.pSigma));
-        buff += sizeof(pos.pSigma);
-        memcpy(&pos.solType, buff, sizeof(pos.solType));
-        buff += sizeof(pos.solType);
-        memcpy(&pos.cheksum, buff, sizeof(pos.cheksum));
-        buff += sizeof(pos.cheksum);
-    return PG;
+        if(len>=30+5) return (mess_data_t){len, PG};
+        return CORRUPTED_MESS;
     }else if(strncmp(buff, "VG", 2) == 0){
-    return VG;
+        if(len>=18+5) return (mess_data_t){len, VG};
+        return CORRUPTED_MESS;
     }else if(strncmp(buff, "AR", 2) == 0){
-    return AR;
+        if(len>=38) return (mess_data_t){len, AR};
+        return CORRUPTED_MESS;
     }else if(strncmp(buff, "AV", 2) == 0){
-    return AV;
+        if(len>=27) return (mess_data_t){len, AV};
+        return CORRUPTED_MESS;
     }else if(strncmp(buff, "MA", 2) == 0){
-    return MA;
+        if(len>=38+5) return (mess_data_t){len, MA};
+        return CORRUPTED_MESS;
     }else if(strncmp(buff, "ha", 2) == 0){
-    return ha;
-    }else if(strncmp(buff, "mr", 2) == 0){
-    return mr;
-    }else{
-        return -1;
+        if(len>=15) return (mess_data_t){len, ha};
+        return CORRUPTED_MESS;
+    }else if(strncmp(buff, "MR", 2) == 0){
+        if(len>=37+5) return (mess_data_t){len, MR};
+        return CORRUPTED_MESS;
+    }
+    return NOT_MESS_START;
+}
+
+char* copy_data(void* dest, char* source, size_t size) {
+    memcpy(dest, source, size);
+    return source + size;
+}
+
+void init_spi(void) {
+    spi_fd = open("/dev/spidev0.0", O_RDWR);
+    if (spi_fd < 0) {
+        perror("Failed to open SPI device");
+        exit(EXIT_FAILURE);
+    }
+
+    // Set SPI mode (Mode 0: CPOL=0, CPHA=0)
+    uint8_t mode = SPI_MODE_0;
+    if (ioctl(spi_fd, SPI_IOC_WR_MODE, &mode) < 0) {
+        perror("Failed to set SPI mode");
+        close(spi_fd);
+        exit(EXIT_FAILURE);
+    }
+
+    // Set bits per word
+    uint8_t bits = 8;
+    if (ioctl(spi_fd, SPI_IOC_WR_BITS_PER_WORD, &bits) < 0) {
+        perror("Failed to set SPI bits per word");
+        close(spi_fd);
+        exit(EXIT_FAILURE);
+    }
+
+    // Set SPI speed (1 MHz)
+    uint32_t speed = 1000000;
+    if (ioctl(spi_fd, SPI_IOC_WR_MAX_SPEED_HZ, &speed) < 0) {
+        perror("Failed to set SPI speed");
+        close(spi_fd);
+        exit(EXIT_FAILURE);
     }
 }
+
+/** Perform an SPI transfer */
+int spi_transfer(uint8_t *tx_buf, uint8_t *rx_buf, int len) {
+    struct spi_ioc_transfer transfer = {
+        .tx_buf = (unsigned long)tx_buf,
+        .rx_buf = (unsigned long)rx_buf,
+        .len = len,
+        .speed_hz = 0, 
+        .delay_usecs = 0,
+        .bits_per_word = 0, 
+        .cs_change = 0,
+    };
+
+    if (ioctl(spi_fd, SPI_IOC_MESSAGE(1), &transfer) < 0) {
+        perror("SPI transfer failed");
+        return -1;
+    }
+    return 0;
+}
+
+void mcp2515_reset(void) {
+    uint8_t tx_buf[1] = {0xC0}; // Reset command
+    uint8_t rx_buf[1];
+    spi_transfer(tx_buf, rx_buf, 1);
+}
+
+uint8_t mcp2515_read_reg(uint8_t address) {
+    uint8_t tx_buf[3] = {0x03, address, 0x00}; // Read command, address, dummy byte
+    uint8_t rx_buf[3];
+    spi_transfer(tx_buf, rx_buf, 3);
+    return rx_buf[2]; // Data is in the third byte
+}
+
+void mcp2515_write_reg(uint8_t address, uint8_t value) {
+    uint8_t tx_buf[3] = {0x02, address, value}; // Write command, address, data
+    uint8_t rx_buf[3];
+    spi_transfer(tx_buf, rx_buf, 3);
+}
+
+void mcp2515_init(void) {
+    mcp2515_reset();
+    usleep(10000);
+
+    // Configure for 500 kbps with 8 MHz clock (example settings)
+    mcp2515_write_reg(0x2A, 0x00); // CNF1: SJW=1, BRP=0
+    mcp2515_write_reg(0x29, 0x90); // CNF2: BTLMODE=1, PHSEG1=2, PRSEG=1
+    mcp2515_write_reg(0x28, 0x02); // CNF3: PHSEG2=3
+
+    mcp2515_write_reg(0x0F, 0x00); // CANCTRL: Normal mode
+}
+
+int mcp2515_send_message(uint32_t id, uint8_t dlc, uint8_t *data) {
+    if (dlc > 8) return -1; // Max 8 bytes
+
+    pthread_mutex_lock(&spi_mutex);
+
+    // Write 11-bit ID to TXB0SIDH and TXB0SIDL
+    uint8_t sidh = (id >> 3) & 0xFF;
+    uint8_t sidl = (id & 0x07) << 5;
+    mcp2515_write_reg(0x31, sidh); // TXB0SIDH
+    mcp2515_write_reg(0x32, sidl); // TXB0SIDL
+
+    mcp2515_write_reg(0x35, dlc); // TXB0DLC
+
+    // Write data to TXB0D0-TXB0D7
+    for (int i = 0; i < dlc; i++) {
+        mcp2515_write_reg(0x36 + i, data[i]);
+    }
+
+    uint8_t tx_buf[1] = {0x81};
+    uint8_t rx_buf[1];
+    spi_transfer(tx_buf, rx_buf, 1);
+
+    pthread_mutex_unlock(&spi_mutex);
+    return 0;
+}
+
+uint8_t mcp2515_read_rx_status(void) {
+    uint8_t tx_buf[2] = {0xA0, 0x00}; 
+    uint8_t rx_buf[2];
+    spi_transfer(tx_buf, rx_buf, 2); 
+    return rx_buf[1]; 
+}
+
+int mcp2515_read_message(uint32_t *id, uint8_t *dlc, uint8_t *data) {
+    pthread_mutex_lock(&spi_mutex); 
+
+    uint8_t sidh = mcp2515_read_reg(0x61); // RXB0SIDH
+    uint8_t sidl = mcp2515_read_reg(0x62); // RXB0SIDL
+    *id = ((uint32_t)sidh << 3) | ((sidl >> 5) & 0x07);
+
+    *dlc = mcp2515_read_reg(0x65) & 0x0F; // Lower 4 bits
+
+    for (int i = 0; i < *dlc && i < 8; i++) {
+        data[i] = mcp2515_read_reg(0x66 + i);
+    }
+
+    pthread_mutex_unlock(&spi_mutex);
+    return 0;
+}
+// char* parse_geo_pos(char* mess){
+
+//     u1* buff = (u1*)mess;
+
+//     u1 chek = checksum(buff, 30);
+
+//     PG_data_t pos;
+    
+//     memcpy(&pos.lat, buff, sizeof(f8));
+//     buff += sizeof(f8);
+//     memcpy(&pos.lon, buff, sizeof(f8));
+//     buff += sizeof(f8);
+//     memcpy(&pos.alt, buff, sizeof(f8));
+//     buff += sizeof(f8);
+//     memcpy(&pos.pSigma, buff, sizeof(pos.pSigma));
+//     buff += sizeof(pos.pSigma);
+//     memcpy(&pos.solType, buff, sizeof(pos.solType));
+//     buff += sizeof(pos.solType);
+//     memcpy(&pos.cheksum, buff, sizeof(pos.cheksum));
+//     buff += sizeof(pos.cheksum);
+
+//     if(pos.cheksum != chek){
+//         return NULL;
+//     }
+
+
+//     return buff; // pointer to rest of the string for multiple mess parsing
+// }
