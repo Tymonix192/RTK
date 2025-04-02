@@ -33,7 +33,15 @@ enum {
 };
 #define ROT_LEFT(val) ((val << lShift) | (val >> rShift))
 
-
+enum CAN_ID {
+    ID_PG = 0x610,
+    PITCH_ROLL_AR = 0x611,
+    LAT_PG = 0x612,
+    LON_PG = 0x613,
+    ALT_PG = 0x614,
+    LAT_LON_VEL_VG = 0x615,
+    ALT_VEL_VG = 0x616,
+};
 
 enum mess_types{
     PV, //cartesian position - not used
@@ -46,6 +54,8 @@ enum mess_types{
     MA, //Accelerometer and Magnetometer Measurements
     ha, // Heading and Pitch
     MR, //Heading and Pitch
+    IM, //Inartial measurements
+    RD, //Reciever date
 };
 
 typedef struct 
@@ -53,6 +63,26 @@ typedef struct
     u4 time;
     u1 checksum;
 }ET_data_t;
+
+typedef struct {
+    f4 accelerations[3];
+    f4 angular_velocities[3];
+    u1 checksum;
+}IM_data_t;
+
+typedef union 
+{
+    IM_data_t data;
+    uint8_t bytes[sizeof(IM_data_t)];
+}data_im_u;
+
+typedef struct{
+    u2 year;
+    u1 month;
+    u1 day;
+    u1 base;
+    u1 cs;
+}RD_data_t;
 
 typedef struct
 {
@@ -90,6 +120,11 @@ typedef struct
                 // 7…1: reserved
     u1 checksum;
 }AR_data_t;
+
+typedef union{
+    AR_data_t data_AR;
+    uint8_t bytes[sizeof(AR_data_t)];
+}data_ar_u;
 
 typedef struct
 {
@@ -140,7 +175,7 @@ typedef struct
 typedef struct{
     char* uart_port;
     int rate;
-    int log_file;
+    FILE* log_file;
     pthread_mutex_t uart_mutex;
 }uart_config_t;
 
@@ -152,7 +187,7 @@ union mess_lenght_t
 
 typedef union 
 {
-    PG_data_t pg_data;
+    PG_data_t data;
     uint8_t bytes[sizeof(PG_data_t)];
 }pg_data_u;
 

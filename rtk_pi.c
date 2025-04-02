@@ -18,8 +18,10 @@
 
 pthread_mutex_t uart_mutex_1 = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t uart_mutex_2 = PTHREAD_MUTEX_INITIALIZER;
-int spi_fd; // File descriptor for SPI device
+int spi_fd; 
 pthread_mutex_t spi_mutex = PTHREAD_MUTEX_INITIALIZER;
+u2 year = 0;
+u1 month = 0, day = 0;
 
 int main(int argc, char* argv[]){
     char *mode = "udp";
@@ -43,7 +45,8 @@ int main(int argc, char* argv[]){
         exit(EXIT_FAILURE);
     }
     
-    pthread_t uart_thread;
+    pthread_t uart_thread_1;
+    pthread_t uart_thread_2;
     
     int udp_rx_sock;
     struct sockaddr_in my_addr = {  .sin_family = AF_INET,
@@ -56,7 +59,7 @@ int main(int argc, char* argv[]){
         return EXIT_FAILURE;
     }
 
-    int broadcast_enable = 1;
+    socklen_t broadcast_enable = 1;
     int opt_result;
     if((setsockopt(udp_rx_sock, SOL_SOCKET, SO_BROADCAST, &broadcast_enable, sizeof(broadcast_enable)))<0){
         perror("Options not set properly");
@@ -88,8 +91,8 @@ int main(int argc, char* argv[]){
     int bytes_read1;
     char uart_buff[UART_BUFF_SIZE];
     
-    FILE* uart_log_1 = open("uart_log_1.txt", "w");
-    FILE* uart_log_2 = open("uart_log_2.txt", "w");
+    FILE* uart_log_1 = fopen("uart_log_1.txt", "w+");
+    FILE* uart_log_2 = fopen("uart_log_2.txt", "w+");
 
     uart_config_t uart_config_1 = {
         .rate = BAUD_RATE,
@@ -103,14 +106,14 @@ int main(int argc, char* argv[]){
         .log_file = uart_log_2,
         .uart_mutex = uart_mutex_2
     };
-    if((pthread_create(&uart_thread, NULL, uart_thread, (void*) &uart_config_1)) != 0){
+    if((pthread_create(&uart_thread_1, NULL, uart_thread, (void*) &uart_config_1)) != 0){
         perror("Failed to create UART thread nr1");
         fclose(udp_log);
         close(uart_stream);
         close(udp_rx_sock);
         return EXIT_FAILURE;
     }
-    if((pthread_create(&uart_thread, NULL, uart_thread, (void*) &uart_config_2)) != 0){
+    if((pthread_create(&uart_thread_2, NULL, uart_thread, (void*) &uart_config_2)) != 0){
         perror("Failed to create UART thread nr2");
         fclose(udp_log);
         close(uart_stream);
@@ -134,7 +137,7 @@ int main(int argc, char* argv[]){
                 }
             }
             ssize_t resp = write(uart_stream, buffer, msg_len);
-            if(resp < 0) perror(errno);
+            if(resp < 0) perror("failed to write to uart stream");
             pthread_mutex_unlock(&uart_mutex_1);
             ssize_t acquired_2 = 0;
             
@@ -143,12 +146,13 @@ int main(int argc, char* argv[]){
                     acquired_2 = 1;
                 }
             }
-            ssize_t resp = write(uart_stream, buffer, msg_len);
-            if(resp < 0) perror(errno);
+            resp = write(uart_stream, buffer, msg_len);
+            if(resp < 0) perror("failed to write to second uart");
             pthread_mutex_unlock(&uart_mutex_1);
         }
     }
-    pthread_join(uart_thread, NULL);
+    pthread_join(uart_thread_1, NULL);
+    pthread_join(uart_thread_2, NULL);
     pthread_mutex_destroy(&uart_mutex_1);
     pthread_mutex_destroy(&uart_mutex_2);
 }
@@ -163,16 +167,15 @@ void* uart_thread(void* arg) {
         return NULL;
     }
     
-    FILE* uart_log = fopen(config->log_file,  "w+");
+    FILE* uart_log = config->log_file;
     char buffer[UART_BUFF_SIZE];
     int mutex_acuired = 0;
-    pthread_mutex_init(&uart_mutex, uart_stream);
     while(!mutex_acuired){
         if(pthread_mutex_trylock(&uart_mutex) == 0){
             puts("mutex acquired");
             mutex_acuired = 1;
         }else{
-            puts(errno);
+            perror("error in acquiring uart mutex");
         }
     }
     int bytes_curr_buff = 0;
@@ -194,7 +197,7 @@ void* uart_thread(void* arg) {
             if(bytes_curr_buff >= curr_mess_data.lenght){
             // pass if curr buff len<len.
             // else do parsing
-            //check for id, then get lenght, then pass till mess lenght is not fully here, if not
+            // check for id, then get lenght, then pass till mess lenght is not fully here, if not
                 buffer[bytes_curr_buff] = '\0';
                 int err;
                 if((err = parse_message(message, curr_mess_data)) <0){
@@ -211,6 +214,9 @@ void* uart_thread(void* arg) {
 }
 
 int parse_message(char* message, mess_data_t message_type){   
+    char* file_name = "%d-%d-%d.csv", year, month, day;
+    FILE* log_file = fopen(file_name, "a+");
+    if(ftell(log_file) == 0)fprintf(log_file, "lat,lon,alt,v_lat,v_lon,v_alt,\n");
     char* body = message +5;
     if(checksum(body, message_type.lenght) != *(message + message_type.lenght -1)) {
         perror("corrupted message, checksum not right");
@@ -220,31 +226,49 @@ int parse_message(char* message, mess_data_t message_type){
     {
     case ET:
         ET_data_t data_ET;
-        copy_data(&data_ET, body, sizeof(data_ET));
-        //send somewhere or sth
+        memcpy(&data_ET, body, sizeof(data_ET)); //should work
         return 0;
     case PG:
-        // trying the move approach for the data transfer.
-        PG_data_t data_PG;
-        pg_data_u* u_ptr;
-        u_ptr = message+5;
-        message = NULL;
+        pg_data_u* data_pg = (data_ar_u*)body;
+        uint8_t* tx_buff = (uint8_t*)&data_pg->data.lat;  
+        mcp2515_send_message(LAT_PG, 8, tx_buff);
+        fprintf(log_file, "%f,", *tx_buff);
+        uint8_t* tx_buff = (uint8_t*)&data_pg->data.lon;  
+        mcp2515_send_message(LON_PG, 8, tx_buff);
+        fprintf(log_file, "%f,", *tx_buff);
+        uint8_t* tx_buff = (uint8_t*)&data_pg->data.alt; 
+        mcp2515_send_message(ALT_PG, 8, tx_buff);
+        fprintf(log_file, "%f,", *tx_buff);
         return 0;
     case VG:
-        VG_data_t data_VG;
-        copy_data(&data_VG, body, sizeof(data_VG));
-        //add some further parsing/sending elswhere
+        VG_data_t* data_vg = (VG_data_t*)body;
+        uint8_t* tx_buff = (uint8_t*)&data_vg->lat_velocity;
+        mcp2515_send_message(LAT_LON_VEL_VG, 8, tx_buff);
+        fprintf(log_file, "%f,%f,",data_vg->lat_velocity, data_vg->lon_velocity);
+        uint8_t* tx_buff = (uint8_t*)&data_vg->alt_velocity;
+        mcp2515_send_message(ALT_VEL_VG, 4, tx_buff);
+        fprintf(log_file,"%f,\n",data_vg->alt_velocity);
         return 0;
     case AR:
-        AR_data_t data_AR;
-        copy_data(&data_AR, body, sizeof(data_AR));
-        //test if this will work
+        data_ar_u* data_ar = (data_ar_u*)body;  // Reinterpret body as union
+        if (data_ar->data_AR.flags & 0x01) {    // Check if data is valid (bit 0)
+            uint8_t* tx_buff = (uint8_t*)&data_ar->data_AR.pitch;  // Point to pitch
+            mcp2515_send_message(PITCH_ROLL_AR, 8, tx_buff);  // Send pitch and roll (8 bytes)
+        }
         return 0;
+    case IM:
+        data_im_u *data_im = (data_im_u*)body;
+        return 0;
+    case RD:
+        RD_data_t* data_rd = (RD_data_t*)body;
+        year = data_rd->year;
+        month = data_rd->month;
+        day = data_rd->month;
     default:
         return -1;
     }
 
-}
+} 
 
 u1 checksum(u1 const* src, int count)
 {
@@ -335,11 +359,11 @@ mess_data_t get_mess_data(char* buff){
     u1 len_bytes[3];
     memcpy(len_bytes, buff + 2, 3);
     int len = (len_bytes[0] << 16) | (len_bytes[1] << 8) | len_bytes[2];
-    int lenght_log = open("mess_lenght_log.txt", "w");
-    if(write(lenght_log, &len, sizeof(len))<0){
+    FILE* lenght_log = fopen("mess_lenght_log.txt", "w+");
+    if(fprintf(lenght_log, "%d\t", len)<0){
         perror("sth went wrong writiong to the lenght log file");
     }
-    close(lenght_log);
+    fclose(lenght_log);
     if(strncmp(buff, "AI", 2) == 0){
         if(len>=26) return (mess_data_t){len, AI};
         return CORRUPTED_MESS;
@@ -370,17 +394,18 @@ mess_data_t get_mess_data(char* buff){
     }else if(strncmp(buff, "MR", 2) == 0){
         if(len>=37+5) return (mess_data_t){len, MR};
         return CORRUPTED_MESS;
+    }else if(strncmp(buff, "IM", 2) == 0){
+        if(len>=25) return(mess_data_t){len, IM};
+        return CORRUPTED_MESS;
+    }else if(strncmp(buff, "RD", 2) == 0){
+        if(len>=sizeof(RD_data_t)) return (mess_data_t){len, RD};
+        return CORRUPTED_MESS;
     }
     return NOT_MESS_START;
 }
 
-char* copy_data(void* dest, char* source, size_t size) {
-    memcpy(dest, source, size);
-    return source + size;
-}
-
 void init_spi(void) {
-    spi_fd = open("/dev/spidev0.0", O_RDWR);
+    spi_fd = open(SPI_PORT, O_RDWR);
     if (spi_fd < 0) {
         perror("Failed to open SPI device");
         exit(EXIT_FAILURE);
@@ -411,7 +436,6 @@ void init_spi(void) {
     }
 }
 
-/** Perform an SPI transfer */
 int spi_transfer(uint8_t *tx_buf, uint8_t *rx_buf, int len) {
     struct spi_ioc_transfer transfer = {
         .tx_buf = (unsigned long)tx_buf,
@@ -510,31 +534,3 @@ int mcp2515_read_message(uint32_t *id, uint8_t *dlc, uint8_t *data) {
     pthread_mutex_unlock(&spi_mutex);
     return 0;
 }
-// char* parse_geo_pos(char* mess){
-
-//     u1* buff = (u1*)mess;
-
-//     u1 chek = checksum(buff, 30);
-
-//     PG_data_t pos;
-    
-//     memcpy(&pos.lat, buff, sizeof(f8));
-//     buff += sizeof(f8);
-//     memcpy(&pos.lon, buff, sizeof(f8));
-//     buff += sizeof(f8);
-//     memcpy(&pos.alt, buff, sizeof(f8));
-//     buff += sizeof(f8);
-//     memcpy(&pos.pSigma, buff, sizeof(pos.pSigma));
-//     buff += sizeof(pos.pSigma);
-//     memcpy(&pos.solType, buff, sizeof(pos.solType));
-//     buff += sizeof(pos.solType);
-//     memcpy(&pos.cheksum, buff, sizeof(pos.cheksum));
-//     buff += sizeof(pos.cheksum);
-
-//     if(pos.cheksum != chek){
-//         return NULL;
-//     }
-
-
-//     return buff; // pointer to rest of the string for multiple mess parsing
-// }
