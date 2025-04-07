@@ -14,9 +14,9 @@
 #define SPI_SPEED 1000000
 #define SPI_MODE SPI_MODE_0
 
-typedef unsigned char u1;
+typedef uint8_t u1;
 typedef char a1;
-typedef char i1;
+typedef int8_t i1;
 typedef int16_t i2;
 typedef uint16_t u2;
 typedef int i4;
@@ -63,6 +63,11 @@ typedef struct
     u4 time;
     u1 checksum;
 }ET_data_t;
+
+typedef union{
+    ET_data_t data;
+    uint8_t bytes[8];
+}data_et_u;
 
 typedef struct {
     f4 accelerations[3];
@@ -171,26 +176,17 @@ typedef struct
     u1 checksum;
 }MR_data_t;
 
-
 typedef struct{
-    char* uart_port;
-    int rate;
+    int uart_port;
     FILE* log_file;
     pthread_mutex_t uart_mutex;
 }uart_config_t;
-
-union mess_lenght_t
-{
-    i4 mess_lenght;
-    u1 bytes[4];
-};
 
 typedef union 
 {
     PG_data_t data;
     uint8_t bytes[sizeof(PG_data_t)];
 }pg_data_u;
-
 
 typedef struct{
     int lenght;
@@ -204,10 +200,7 @@ u1 checksum(u1 const* src, int count);
 void* uart_thread(void* arg);
 mess_data_t get_mess_data(char *mess);
 int configure_uart(const char* device, int baudrate);
-char* parse_geo_pos(char* mess);
-int spi_communication(char* mess, ssize_t len);
 int parse_message(char* message, mess_data_t message_type);
-char* copy_data(void* dest, char* source, size_t size);
 
 void init_spi(void);
 void mcp2515_init(void);
