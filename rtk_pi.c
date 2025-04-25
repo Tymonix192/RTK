@@ -59,12 +59,12 @@ int main(int argc, char* argv[]){
         return EXIT_FAILURE;
     }
 
-    socklen_t broadcast_enable = 1;
-    int opt_result;
-    if((setsockopt(udp_rx_sock, SOL_SOCKET, SO_BROADCAST, &broadcast_enable, sizeof(broadcast_enable)))<0){
-        perror("Options not set properly");
-        return EXIT_FAILURE;
-    }
+    // socklen_t broadcast_enable = 1;
+    // int opt_result;
+    // if((setsockopt(udp_rx_sock, SOL_SOCKET, SO_BROADCAST, &broadcast_enable, sizeof(broadcast_enable)))<0){
+    //     perror("Options not set properly");
+    //     return EXIT_FAILURE;
+    // }
 
     int result = bind(udp_rx_sock, (struct sockaddr*)&my_addr, sizeof(my_addr));
 
@@ -123,14 +123,18 @@ int main(int argc, char* argv[]){
         return EXIT_FAILURE;
     }
     
-    while (1) {
+    while (127) {
         ssize_t msg_len = recv(udp_rx_sock, buffer, BUFF_SIZE, 0);
 
+        printf("mess len: %d\n", msg_len);
+
+        for(int i = 0;i<msg_len;i++){
+            printf("%#x", buffer[i]);
+        }
+        printf("\n");
+        fflush(stdout);
+
         if (msg_len > 0) {
-            buffer[msg_len] = '\0';
-            fprintf(udp_log, "%s", buffer);
-            printf("saving udp datagram\n");
-            
             ssize_t acquired = 0;
             
             while(!acquired){
@@ -138,8 +142,14 @@ int main(int argc, char* argv[]){
                     acquired = 1;
                 }
             }
+            printf("\nwriting\n");
             ssize_t resp = write(uart_stream1, buffer, msg_len);
-            if(resp < 0) perror("failed to write to uart stream");
+            if(resp < 0){
+                perror("failed to write to uart stream");
+                printf("wertyu");
+                fflush(stdout);
+            } 
+            printf("written: %d\n", resp);
             pthread_mutex_unlock(&uart_mutex_1);
             ssize_t acquired_2 = 0;
             
@@ -186,17 +196,23 @@ void* uart_thread(void* arg) {
         }
         if (bytes_read > 0) {
             buffer[bytes_curr_buff+1] = '\0';
-            printf("byte read: %#x ", buffer[bytes_curr_buff]);
             bytes_curr_buff += bytes_read;
             if(bytes_curr_buff > 5 ){
                 curr_mess_data = get_mess_data(buffer);
+                if(curr_mess_data.lenght == -2){
+                    bytes_curr_buff == 0;
+                    memset(buffer, '0', 5);
+                }
             }
             if((bytes_curr_buff >= curr_mess_data.lenght+5) && (curr_mess_data.lenght > 1) ){
                 buffer[bytes_curr_buff] = '\0';
                 int res = parse_message(buffer, curr_mess_data);
-
-                bytes_curr_buff = 0;
-                printf("helo");
+                if(res == 2){
+                    buffer[0] = buffer[bytes_curr_buff-1];
+                    bytes_curr_buff = 1;
+                }else{
+                    bytes_curr_buff = 0;
+                }
                 pthread_mutex_unlock(&uart_mutex);
             }
         }else{
@@ -215,15 +231,9 @@ int parse_message(char* message, mess_data_t message_type){
     if(ftell(log_file) == 0){
         fprintf(log_file, "lat,lon,alt,v_lat,v_lon,v_alt,\n");
     }
-    printf("before cheksum calc\nmessage in hex:");
-    for(int i = 0; i<11;i++)
-    {
-        printf("%#x", *(message+i));
-    }
-    printf("\ncheksum in message: %d\n", (uint8_t)*(message+5+message_type.lenght-1));
     // uint8_t cs = checksum(message + 5, message_type.lenght);
     // if(cs != (uint8_t)*(message + message_type.lenght+5-1)) {
-    //     errno = -2;
+        //     errno = -2;
     //     printf("wrong checksum, func got: %d \n", cs);
     //     fflush(stdout);
     //     return -1;
@@ -238,9 +248,26 @@ int parse_message(char* message, mess_data_t message_type){
         }
         // memcpy(&data_ET.data.time, (uint8_t*)(message+5), 4);
         // memcpy(&data_ET.data.checksum, (uint8_t*)(message+5)+4, 1);
-        uint8_t cs = checksum(message + 5, message_type.lenght+1);
-        printf("time: %d, cheksum: %d, calculated cheksum: %d\n", data_ET.data.time, data_ET.data.checksum, cs);
         
+        uint8_t cs = checksum(message + 5, message_type.lenght+1);
+        const long long MS_PER_SECOND = 1000;
+        const long long MS_PER_MINUTE = 60 * MS_PER_SECOND;
+        const long long MS_PER_HOUR = 60 * MS_PER_MINUTE;
+        
+        int hours = (int)(data_ET.data.time / MS_PER_HOUR);
+        
+        long long remainingMs = data_ET.data.time % MS_PER_HOUR;
+        
+        int minutes = (int)(remainingMs / MS_PER_MINUTE);
+        
+        remainingMs = remainingMs % MS_PER_MINUTE;
+        
+        int seconds = (int)(remainingMs / MS_PER_SECOND);
+        
+        printf("\ntime %02d:%02d:%02d", hours, minutes, seconds);
+        
+        if(data_ET.data.time <0) return 2;
+
         return 0;
     case PG:
         pg_data_u* data_pg = (pg_data_u*)(message+5);
@@ -314,9 +341,10 @@ mess_data_t get_mess_data(char* buff){
     uint8_t mess_lenght[4];
     memcpy(mess_lenght, buff+2, 3);
     mess_lenght[3] = '\0';
-    printf("\nlenght string: %s", mess_lenght);
     int len = atoi(mess_lenght);
-    printf(" len: %d", len);
+    if(len == 0){
+        return (mess_data_t){-2,-2};
+    }
     FILE* lenght_log = fopen("mess_lenght_log.txt", "a");
     if(fprintf(lenght_log, "%d\t", len)<0){
         perror("sth went wrong writiong to the lenght log file");
@@ -324,7 +352,6 @@ mess_data_t get_mess_data(char* buff){
     fclose(lenght_log);
     if(strncmp(buff, "::", 2) == 0){
         if(len>=5) {
-            printf(" in get mess data ");
             return (mess_data_t){len, ET};
         }
         return CORRUPTED_MESS;

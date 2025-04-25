@@ -3,8 +3,8 @@
 #include <math.h>
 #include <sys/types.h>
 
-#define UDP_PORT 8000
-#define BUFF_SIZE 1024
+#define UDP_PORT 8004
+#define BUFF_SIZE 4096
 #define UART_BUFF_SIZE 256
 #define UART_PORT "/dev/serial0"
 #define UART_PORT_2 "/dev/serial1"
